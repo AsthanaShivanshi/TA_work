@@ -1,0 +1,88 @@
+
+# Model configurations for the entire hierarchy: UNet, VAE, LDM
+model:
+  unet:
+    in_channels: 19    # Match your real input channels (low_2mT + static vars)
+    out_channels: 1
+    lr: 1e-3
+
+  vae:
+    latent_dim: 64
+    input_channels: 1  # Residuals are single-channel
+    input_height: 672
+    input_width: 576
+    lr: 1e-3
+    kl_weight: 0.001
+
+  ldm:
+    latent_dim: 64
+    lr: 1e-4
+    num_timesteps: 50
+    noise_schedule: "linear"
+    loss_type: "l2"
+    hidden_dim: 128
+    num_layers: 4
+
+trainer:
+  max_epochs: 10
+  min_delta: 1e-4
+  accelerator: "auto"
+
+training:
+  unet_epochs: 10
+  vae_epochs: 10
+  ldm_epochs: 10
+
+data:
+  batch_size: 32
+  train_split: 0.7
+  val_split: 0.2
+  test_split: 0.1
+
+optimizer:
+  unet:
+    type: "Adam"
+    lr: 1e-3
+    weight_decay: 1e-4
+  vae:
+    type: "AdamW"
+    lr: 1e-3
+    betas: [0.5, 0.9]
+    weight_decay: 1e-3
+  ldm:
+    type: "AdamW"
+    lr: 1e-4
+    betas: [0.5, 0.9]
+    weight_decay: 1e-3
+
+scheduler:
+  unet:
+    type: "ReduceLROnPlateau"
+    patience: 5
+    factor: 0.5
+    monitor: "val/loss"
+  vae:
+    type: "ReduceLROnPlateau"
+    patience: 3
+    factor: 0.25
+    monitor: "val/reconstruction_loss"
+  ldm:
+    type: "ReduceLROnPlateau"
+    patience: 5
+    factor: 0.5
+    monitor: "val/loss"
+
+generation:
+  num_samples: 2
+  num_steps: 20
+  guidance_scale: 1.0
+
+logging:
+  log_every_n_steps: 10
+  save_dir: "./logs"
+  experiment_name: "LDM_downscaling_pipeline"
+
+paths:
+  checkpoint_dir: "./checkpoints"
+  output_dir: "./outputs"
+  data_dir: "./data"

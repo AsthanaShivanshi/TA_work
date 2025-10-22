@@ -1,0 +1,9 @@
+*.pt
+*.zst   
+__pycache__/
+.ipynb_checkpoints/
+*.ckpt
+.venv/
+env/
+./checkpoints/
+lightning_logs/version_38/
