@@ -7,3 +7,4 @@ __pycache__/
 env/
 ./checkpoints/
 lightning_logs/version_38/
+checkpoints/
