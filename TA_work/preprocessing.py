@@ -26,8 +26,12 @@ def load_static_tif(filepath):
     ds = xr.open_dataset(filepath, engine="rasterio")
     arr = ds['band_data'][0].values
     arr = np.nan_to_num(arr)
-    arr = (arr - np.mean(arr)) / (np.std(arr) + 1e-8)
+    std = np.std(arr)
+    if std < 1e-6:
+        std = 1.0  # NaN handling by avoiding division by zero
+    arr = (arr - np.mean(arr)) / std
     return torch.tensor(arr, dtype=torch.float32)
+
 
 def load_land_cover(filepath):
     ds = xr.open_dataset(filepath, engine="rasterio")
@@ -35,11 +39,13 @@ def load_land_cover(filepath):
     for i in range(ds['band_data'].shape[0]):
         arr = ds['band_data'][i].values
         arr = np.nan_to_num(arr)
-        arr = (arr - np.mean(arr)) / (np.std(arr) + 1e-8)
+        std = np.std(arr)
+        if std < 1e-6:
+            std = 1.0  # NaN handling by avoiding division by zero
+        arr = (arr - np.mean(arr)) / std
         bands.append(torch.tensor(arr, dtype=torch.float32))
-    return torch.stack(bands)  # [bands, H, W]
+    return torch.stack(bands)
 
-import torch.nn.functional as F
 
 def collate_fn(batch):
     """
