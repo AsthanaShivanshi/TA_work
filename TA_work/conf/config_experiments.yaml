@@ -1,52 +1,51 @@
-
-# Model configurations for the entire hierarchy: UNet, VAE, LDM
 model:
   unet:
-    in_channels: 19    # Match your real input channels (low_2mT + static vars)
+    in_channels: 19
     out_channels: 1
-    lr: 1e-3
+    lr: 1e-4
+    channels: [32, 16]   # List of channels for each layer
+    kernel_size: 3       # Kernel size for all conv layers
 
   vae:
-    latent_dim: 64
-    input_channels: 1  # Residuals are single-channel
+    latent_dim: 32
+    input_channels: 1
     input_height: 672
     input_width: 576
-    lr: 1e-3
+    lr: 1e-4
     kl_weight: 0.001
+    encoder_channels: [8]  # List of channels for encoder
+    decoder_channels: [8]  # List of channels for decoder
 
   ldm:
-    latent_dim: 64
+    latent_dim: 32
     lr: 1e-4
-    num_timesteps: 50
-    noise_schedule: "linear"
-    loss_type: "l2"
-    hidden_dim: 128
-    num_layers: 4
+    num_timesteps: 20
+    noise_schedule: "linear" #alternative can be cosine
+    loss_type: "l2" #MSE here, can also be l1, MAE
+    hidden_dim: 64
+    num_layers: 2
 
 trainer:
   max_epochs: 10
   min_delta: 1e-4
   accelerator: "auto"
+  gradient_clip_val: 1.0
 
 training:
   unet_epochs: 10
   vae_epochs: 10
   ldm_epochs: 10
 
-data:
-  batch_size: 32
-  train_split: 0.7
-  val_split: 0.2
-  test_split: 0.1
+
 
 optimizer:
   unet:
     type: "Adam"
-    lr: 1e-3
+    lr: 1e-4
     weight_decay: 1e-4
   vae:
     type: "AdamW"
-    lr: 1e-3
+    lr: 1e-4
     betas: [0.5, 0.9]
     weight_decay: 1e-3
   ldm:
@@ -58,31 +57,36 @@ optimizer:
 scheduler:
   unet:
     type: "ReduceLROnPlateau"
-    patience: 5
-    factor: 0.5
+    patience: 2
+    factor: 0.25
     monitor: "val/loss"
   vae:
     type: "ReduceLROnPlateau"
-    patience: 3
+    patience: 2
     factor: 0.25
-    monitor: "val/reconstruction_loss"
+    monitor: "val/recon_loss"
   ldm:
     type: "ReduceLROnPlateau"
-    patience: 5
-    factor: 0.5
+    patience: 2
+    factor: 0.25
     monitor: "val/loss"
-
-generation:
-  num_samples: 2
-  num_steps: 20
-  guidance_scale: 1.0
 
 logging:
   log_every_n_steps: 10
   save_dir: "./logs"
   experiment_name: "LDM_downscaling_pipeline"
 
+data:
+  batch_size: 32
+  train_split: 0.7
+  val_split: 0.15
+  test_split: 0.15
+  num_workers: 4
+
 paths:
-  checkpoint_dir: "./checkpoints"
-  output_dir: "./outputs"
-  data_dir: "./data"
+  checkpoint_dir: "./checkpoints" #Path where your models are saved 
+  output_dir: "./outputs" #Path where output samples are saved 
+  data_dir: "./data" #Path where your data should be 
+  static_dir: "./data/static_var" #Path where static data is saved
+
+seed: 42 #Do not forget this, crucial for reproducibility!
