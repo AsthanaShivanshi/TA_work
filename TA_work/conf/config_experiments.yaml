@@ -1,92 +1,84 @@
+data:
+  batch_size: 16
+  num_workers: 1
+  test_split: 0.15
+  train_split: 0.7
+  val_split: 0.15
 model:
-  unet:
-    in_channels: 19
-    out_channels: 1
-    lr: 1e-4
-    channels: [32, 16]   # List of channels for each layer
-    kernel_size: 3       # Kernel size for all conv layers
-
-  vae:
+  ldm:
+    hidden_dim: 64
     latent_dim: 32
+    loss_type: l2
+    lr: 0.0001
+    noise_schedule: linear
+    num_layers: 2
+    num_timesteps: 20
+  unet:
+    channels:
+    - 32
+    - 16
+    in_channels: 19
+    kernel_size: 3
+    lr: 0.0001
+    out_channels: 1
+  vae:
+    decoder_channels:
+    - 8
+    encoder_channels:
+    - 8
     input_channels: 1
     input_height: 672
     input_width: 576
-    lr: 1e-4
     kl_weight: 0.001
-    encoder_channels: [8]  # List of channels for encoder
-    decoder_channels: [8]  # List of channels for decoder
-
-  ldm:
     latent_dim: 32
-    lr: 1e-4
-    num_timesteps: 20
-    noise_schedule: "linear" #alternative can be cosine
-    loss_type: "l2" #MSE here, can also be l1, MAE
-    hidden_dim: 64
-    num_layers: 2
-
+    lr: 0.0001
+optimizer:
+  ldm:
+    betas:
+    - 0.5
+    - 0.9
+    lr: 0.0001
+    type: AdamW
+    weight_decay: 0.001
+  unet:
+    lr: 0.0001
+    type: Adam
+    weight_decay: 0.0001
+  vae:
+    betas:
+    - 0.5
+    - 0.9
+    lr: 0.0001
+    type: AdamW
+    weight_decay: 0.001
+paths:
+  checkpoint_dir: /work/FAC/FGSE/IDYST/tbeucler/downscaling/sasthana/Downscaling/TA_work/checkpoints
+  data_dir: /work/FAC/FGSE/IDYST/tbeucler/downscaling/sasthana/Downscaling/TA_work/DiffScaler/data
+  output_dir: /work/FAC/FGSE/IDYST/tbeucler/downscaling/sasthana/Downscaling/TA_work/outputs_dir
+  static_dir: /work/FAC/FGSE/IDYST/tbeucler/downscaling/sasthana/Downscaling/TA_work/DiffScaler/data/static_var
+scheduler:
+  ldm:
+    factor: 0.25
+    monitor: val/loss
+    patience: 2
+    type: ReduceLROnPlateau
+  unet:
+    factor: 0.25
+    monitor: val/loss
+    patience: 2
+    type: ReduceLROnPlateau
+  vae:
+    factor: 0.25
+    monitor: val/recon_loss
+    patience: 2
+    type: ReduceLROnPlateau
+seed: 42
 trainer:
-  max_epochs: 10
-  min_delta: 1e-4
-  accelerator: "auto"
+  accelerator: gpu
   gradient_clip_val: 1.0
-
+  max_epochs: 10
+  min_delta: 0.0001
 training:
+  ldm_epochs: 10
   unet_epochs: 10
   vae_epochs: 10
-  ldm_epochs: 10
-
-
-
-optimizer:
-  unet:
-    type: "Adam"
-    lr: 1e-4
-    weight_decay: 1e-4
-  vae:
-    type: "AdamW"
-    lr: 1e-4
-    betas: [0.5, 0.9]
-    weight_decay: 1e-3
-  ldm:
-    type: "AdamW"
-    lr: 1e-4
-    betas: [0.5, 0.9]
-    weight_decay: 1e-3
-
-scheduler:
-  unet:
-    type: "ReduceLROnPlateau"
-    patience: 2
-    factor: 0.25
-    monitor: "val/loss"
-  vae:
-    type: "ReduceLROnPlateau"
-    patience: 2
-    factor: 0.25
-    monitor: "val/recon_loss"
-  ldm:
-    type: "ReduceLROnPlateau"
-    patience: 2
-    factor: 0.25
-    monitor: "val/loss"
-
-logging:
-  log_every_n_steps: 10
-  save_dir: "./logs"
-  experiment_name: "LDM_downscaling_pipeline"
-
-data:
-  batch_size: 32
-  train_split: 0.7
-  val_split: 0.15
-  test_split: 0.15
-  num_workers: 4
-
-paths:
-  checkpoint_dir: "./checkpoints" #Path where your models are saved 
-  output_dir: "./outputs" #Path where output samples are saved 
-  data_dir: "./data" #Path where your data should be 
-  static_dir: "./data/static_var" #Path where static data is saved
-
-seed: 42 #Do not forget this, crucial for reproducibility!
