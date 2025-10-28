@@ -1,0 +1,44 @@
+Traceback (most recent call last):
+  File "/work/FAC/FGSE/IDYST/tbeucler/downscaling/sasthana/Downscaling/Downscaling_Models/.micromamba/envs/diffscaler/lib/python3.9/site-packages/xarray/backends/file_manager.py", line 211, in _acquire_with_cache_info
+    file = self._cache[self._key]
+  File "/work/FAC/FGSE/IDYST/tbeucler/downscaling/sasthana/Downscaling/Downscaling_Models/.micromamba/envs/diffscaler/lib/python3.9/site-packages/xarray/backends/lru_cache.py", line 56, in __getitem__
+    value = self._cache[key]
+KeyError: [<function open at 0x7f881b98a940>, ('./data/static_var/dtm_2km_domain_trim_EPSG3035.tif',), 'r', (('sharing', False),), '7df25d0f-fae6-46c6-8de3-c0111e0b96f6']
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "rasterio/_base.pyx", line 310, in rasterio._base.DatasetBase.__init__
+  File "rasterio/_base.pyx", line 221, in rasterio._base.open_dataset
+  File "rasterio/_err.pyx", line 359, in rasterio._err.exc_wrap_pointer
+rasterio._err.CPLE_OpenFailedError: ./data/static_var/dtm_2km_domain_trim_EPSG3035.tif: No such file or directory
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/work/FAC/FGSE/IDYST/tbeucler/downscaling/sasthana/Downscaling/TA_work/slurm_script_short_exercise.py", line 727, in <module>
+    train_hierarchy(cfg)
+  File "/work/FAC/FGSE/IDYST/tbeucler/downscaling/sasthana/Downscaling/TA_work/slurm_script_short_exercise.py", line 612, in train_hierarchy
+    data_module.setup()
+  File "/work/FAC/FGSE/IDYST/tbeucler/downscaling/sasthana/Downscaling/TA_work/slurm_script_short_exercise.py", line 75, in setup
+    static_vars, stats = load_and_normalise(
+  File "/work/FAC/FGSE/IDYST/tbeucler/downscaling/sasthana/Downscaling/TA_work/preprocessing.py", line 85, in load_and_normalise
+    dem = load_static_tif(os.path.join(static_dir, "dtm_2km_domain_trim_EPSG3035.tif"))
+  File "/work/FAC/FGSE/IDYST/tbeucler/downscaling/sasthana/Downscaling/TA_work/preprocessing.py", line 35, in load_static_tif
+    ds = xr.open_dataset(filepath, engine="rasterio")
+  File "/work/FAC/FGSE/IDYST/tbeucler/downscaling/sasthana/Downscaling/Downscaling_Models/.micromamba/envs/diffscaler/lib/python3.9/site-packages/xarray/backends/api.py", line 588, in open_dataset
+    backend_ds = backend.open_dataset(
+  File "/work/FAC/FGSE/IDYST/tbeucler/downscaling/sasthana/Downscaling/Downscaling_Models/.micromamba/envs/diffscaler/lib/python3.9/site-packages/rioxarray/xarray_plugin.py", line 54, in open_dataset
+    rds = _io.open_rasterio(
+  File "/work/FAC/FGSE/IDYST/tbeucler/downscaling/sasthana/Downscaling/Downscaling_Models/.micromamba/envs/diffscaler/lib/python3.9/site-packages/rioxarray/_io.py", line 1124, in open_rasterio
+    riods = manager.acquire()
+  File "/work/FAC/FGSE/IDYST/tbeucler/downscaling/sasthana/Downscaling/Downscaling_Models/.micromamba/envs/diffscaler/lib/python3.9/site-packages/xarray/backends/file_manager.py", line 193, in acquire
+    file, _ = self._acquire_with_cache_info(needs_lock)
+  File "/work/FAC/FGSE/IDYST/tbeucler/downscaling/sasthana/Downscaling/Downscaling_Models/.micromamba/envs/diffscaler/lib/python3.9/site-packages/xarray/backends/file_manager.py", line 217, in _acquire_with_cache_info
+    file = self._opener(*self._args, **kwargs)
+  File "/work/FAC/FGSE/IDYST/tbeucler/downscaling/sasthana/Downscaling/Downscaling_Models/.micromamba/envs/diffscaler/lib/python3.9/site-packages/rasterio/env.py", line 463, in wrapper
+    return f(*args, **kwds)
+  File "/work/FAC/FGSE/IDYST/tbeucler/downscaling/sasthana/Downscaling/Downscaling_Models/.micromamba/envs/diffscaler/lib/python3.9/site-packages/rasterio/__init__.py", line 356, in open
+    dataset = DatasetReader(path, driver=driver, sharing=sharing, **kwargs)
+  File "rasterio/_base.pyx", line 312, in rasterio._base.DatasetBase.__init__
+rasterio.errors.RasterioIOError: ./data/static_var/dtm_2km_domain_trim_EPSG3035.tif: No such file or directory
