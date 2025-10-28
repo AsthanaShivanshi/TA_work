@@ -78,6 +78,6 @@ trainer:
   max_epochs: 10
   min_delta: 0.0001
 training:
-  ldm_epochs: 10
-  unet_epochs: 10
-  vae_epochs: 10
+  ldm_epochs: 20
+  unet_epochs: 20
+  vae_epochs: 20
