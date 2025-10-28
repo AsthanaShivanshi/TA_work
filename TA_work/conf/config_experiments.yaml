@@ -2,7 +2,6 @@ data:
   batch_size: 16
   num_workers: 1
   test_split: 0.15
-  train_split: 0.7
   val_split: 0.15
 model:
   ldm:
