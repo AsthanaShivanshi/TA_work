@@ -49,10 +49,7 @@ def load_land_cover(filepath, means=None, stds=None):
 
 
 def collate_fn(batch):
-    """
-    Upsample low-res temperature to high-res dimensions and combine with HR static inputs.
-    This creates fuzzy upsampled inputs for the UNet to refine.
-    """
+
     # Stack the individual components
     low_2mt = torch.stack([b["low_2mT"] for b in batch])  # [B, 1, 84, 72]
     high_2mt = torch.stack([b["high_2mT"] for b in batch])  # [B, 1, 672, 576]
