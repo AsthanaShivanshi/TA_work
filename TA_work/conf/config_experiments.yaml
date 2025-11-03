@@ -79,5 +79,5 @@ trainer:
   min_delta: 0.0001
 training:
   ldm_epochs: 20
-  unet_epochs: 20
+  unet_epochs: 30
   vae_epochs: 20

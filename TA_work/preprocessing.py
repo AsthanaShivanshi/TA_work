@@ -5,12 +5,8 @@ import zstandard
 import io
 import numpy as np
 import xarray as xr
-from torch.utils.data import Dataset, DataLoader, random_split
-import rasterio
-import rioxarray
 import torch.nn.functional as F
 import json
-import random
 
 DATA_DIR = "DiffScaler/data/"
 STATIC_DIR = os.path.join(DATA_DIR, "static_var/")
@@ -169,7 +165,6 @@ def load_land_cover(filepath, means=None, stds=None):
 
 def collate_fn(batch):
     """
-    Upsample low-res temperature to high-res dimensions and combine with HR static inputs.
     This creates fuzzy upsampled inputs for the UNet to refine.
     """
     # Stack the individual components
@@ -246,20 +241,14 @@ def load_and_normalise(static_dir, val_frac=0.15, test_frac=0.15, save_stats_jso
     return {"dem": dem, "lat": lat, "lc": lc}, stats
 
 
+#You can change the way you sample data: here , to be mindful of capturing diurnal as well as seasonal variations, we take the first week of every month from 2020
 
 def get_file_list():
+    high_files = sorted(glob.glob(os.path.join(DATA_DIR, "2020/*_high_2mT.pt.zst")))
+    low_files = sorted(glob.glob(os.path.join(DATA_DIR, "2020/*_low.pt.zst")))
     files = []
-    for year in YEARS:
-        folder = os.path.join(DATA_DIR, year)
-        high_files = sorted(glob.glob(os.path.join(folder, "*_high_2mT.pt.zst")))
-        for hf in high_files:
-            date = os.path.basename(hf).split("_")[0]
-            low_file = hf.replace("_high_2mT.pt.zst", "_low.pt.zst")
-            if os.path.exists(low_file):
-                files.append((hf, low_file, date))
-    files = sorted(files, key=lambda x: x[2])  # sort by date
-    n_total = len(files)
-    n_keep = int(0.5 * n_total)
-    files = files[:n_keep]  # keep first 50%
-    print(f"Using {n_keep} of {n_total} files from 2020.")
+    for hf, lf in zip(high_files, low_files):
+        date = os.path.basename(hf).split('_')[0]  # e.g., '2020-05-04'
+        files.append((hf, lf, date))
+    print(f"Using {len(files)} samples from 2020.")
     return files
