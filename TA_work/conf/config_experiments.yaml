@@ -6,7 +6,7 @@ data:
 model:
   ldm:
     hidden_dim: 64
-    latent_dim: 16
+    latent_dim: 36
     loss_type: l2
     lr: 0.0001
     noise_schedule: linear
@@ -29,7 +29,7 @@ model:
     input_height: 672
     input_width: 576
     kl_weight: 0.001
-    latent_dim: 16
+    latent_dim: 36
     lr: 0.0001
 optimizer:
   ldm:
@@ -59,17 +59,17 @@ scheduler:
   ldm:
     factor: 0.25
     monitor: val/loss
-    patience: 2
+    patience: 3
     type: ReduceLROnPlateau
   unet:
     factor: 0.25
     monitor: val/loss
-    patience: 2
+    patience: 3
     type: ReduceLROnPlateau
   vae:
     factor: 0.25
     monitor: val/recon_loss
-    patience: 2
+    patience: 3
     type: ReduceLROnPlateau
 seed: 42
 trainer:
@@ -78,6 +78,6 @@ trainer:
   max_epochs: 10
   min_delta: 0.0001
 training:
-  ldm_epochs: 10
+  ldm_epochs: 20
   unet_epochs: 20
-  vae_epochs: 10
+  vae_epochs: 20
