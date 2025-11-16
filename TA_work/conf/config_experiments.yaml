@@ -6,12 +6,15 @@ data:
 model:
   ldm:
     hidden_dim: 64
+    latent_height: 6
+    latent_width: 6
     latent_dim: 36
     loss_type: l2
     lr: 0.0001
     noise_schedule: linear
     num_layers: 2
     num_timesteps: 20
+    param_type: eps
   unet:
     channels:
     - 32

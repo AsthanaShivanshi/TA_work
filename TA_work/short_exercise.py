@@ -39,6 +39,8 @@ class DownscalingDataset(Dataset):
         ], dim=0)
         return fuzzy_input, high_t2m
 
+
+
 class DownscalingDataModule(LightningDataModule):
     def __init__(self, batch_size, val_frac, test_frac, num_workers, static_dir, save_stats_json):
         super().__init__()
@@ -185,7 +187,7 @@ def kl_divergence(mean, log_var):
     return kl.mean()
 
 class VAE(nn.Module):
-    def __init__(self, latent_dim=32, hidden_dim=128):
+    def __init__(self, latent_dim=36, hidden_dim=128):
         super().__init__()
         self.encoder = nn.Sequential(
             nn.Conv2d(1, hidden_dim, 3, padding=1), nn.ReLU(),
@@ -287,16 +289,19 @@ class LatentDenoiser(nn.Module):
         return self.unet(x)
 
 class LDMLitModule(LightningModule):
-    def __init__(self, vae, latent_dim=64, lr=1e-4, num_timesteps=50, noise_schedule="linear", loss_type="l2", hidden_dim=128, num_layers=4, optimizer=None, scheduler=None):
+    def __init__(self, vae, latent_dim=64, latent_height=6, latent_width=6, lr=1e-4, num_timesteps=50, noise_schedule="linear", loss_type="l2", hidden_dim=128, num_layers=4, param_type="eps", optimizer=None, scheduler=None):
         super().__init__()
         self.save_hyperparameters(logger=False, ignore=['vae'])
         self.vae = vae.vae.requires_grad_(False)
+        self.latent_height = latent_height
+        self.latent_width = latent_width
         self.vae.eval()
         self.unet = vae.unet
         self.denoiser = LatentDenoiser(1, 1, [hidden_dim]*num_layers, 3)
         self.lr = lr
         self.num_timesteps = num_timesteps
         self.loss_fn = {"l1": nn.L1Loss(), "l2": nn.MSELoss()}[loss_type]
+        self.param_type = param_type
         self.register_noise_schedule(noise_schedule)
         self.hparams.optimizer = optimizer
         self.hparams.scheduler = scheduler
@@ -330,18 +335,32 @@ class LDMLitModule(LightningModule):
         if noise is None:
             noise = torch.randn_like(x_start)
         x_noisy = self.q_sample(x_start, t, noise)
-        B, latent_dim = x_noisy.shape
-        H = int(latent_dim ** 0.5)
-        W = latent_dim // H
-        x_noisy_4d = x_noisy.view(B, 1, H, W)
-        unet_pred_ds = F.interpolate(unet_pred, size=(H, W), mode='bilinear', align_corners=False)
-        predicted_noise = self.denoiser(x_noisy_4d, unet_pred_ds, t.unsqueeze(1).to(x_noisy.device))
-        return self.loss_fn(predicted_noise, noise.view(B, 1, H, W))
+        B = x_noisy.shape[0]
+
+        x_noisy_4d = x_noisy.view(B, 1, self.latent_height, self.latent_width)
+        unet_pred_ds = F.interpolate(unet_pred, size=(self.latent_height, self.latent_width), mode='bilinear', align_corners=False)
+
+        # param can be "eps", "x0", or "v"
+        if self.param_type == "eps":
+            target = noise.view(B, 1, self.latent_height, self.latent_width)
+        elif self.param_type == "x0":
+            target = x_start.view(B, 1, self.latent_height, self.latent_width)
+        elif self.param_type == "v":
+            alpha_t = self.sqrt_alphas_cumprod[t].view(-1, 1, 1, 1)
+            sigma_t = self.sqrt_one_minus_alphas_cumprod[t].view(-1, 1, 1, 1)
+            target = alpha_t * noise.view(B, 1, self.latent_height, self.latent_width) - sigma_t * x_start.view(B, 1, self.latent_height, self.latent_width)
+        else:
+            raise ValueError(f"Unknown param_type: {self.param_type}")
+
+        predicted = self.denoiser(x_noisy_4d, unet_pred_ds, t.unsqueeze(1).to(x_noisy.device))
+        return self.loss_fn(predicted, target)
 
     def forward(self, x, unet_pred):
         with torch.no_grad():
             mu, logvar = self.vae.encode(unet_pred[:, 0:1])
             z = self.vae.reparameterize(mu, logvar)
+        # z to [B, 1, latent_height, latent_width]
+        z = z.view(-1, 1, self.latent_height, self.latent_width)
         t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device)
         return self.p_losses(z, unet_pred[:, 0:1], t)
 
@@ -396,7 +415,6 @@ def train_hierarchy(cfg):
     checkpoint_dir = cfg.paths.checkpoint_dir
     os.makedirs(checkpoint_dir, exist_ok=True)
 
-    # --- UNet ---
     unet_ckpt_dir = os.path.join(checkpoint_dir, "unet")
     os.makedirs(unet_ckpt_dir, exist_ok=True)
     unet_ckpts = sorted([f for f in os.listdir(unet_ckpt_dir) if f.endswith(".ckpt")])
@@ -438,7 +456,13 @@ def train_hierarchy(cfg):
     vae_ckpts = sorted([f for f in os.listdir(vae_ckpt_dir) if f.endswith(".ckpt")])
     if vae_ckpts:
         print("Loading pretrained VAE ckpt")
-        vae_module = VAELitModule.load_from_checkpoint(os.path.join(vae_ckpt_dir, vae_ckpts[-1]))
+        vae = VAE(latent_dim=cfg.model.vae.latent_dim,hidden_dim=cfg.model.vae.hidden_dim
+)
+        vae_module = VAELitModule.load_from_checkpoint(
+    os.path.join(vae_ckpt_dir, vae_ckpts[-1]),
+    vae=vae,
+    unet_module=unet_module
+)
     else:
         print("Training VAE")
         vae = VAE(
@@ -479,6 +503,8 @@ def train_hierarchy(cfg):
         ldm_module = LDMLitModule(
             vae=vae_module,
             latent_dim=cfg.model.ldm.latent_dim,
+            latent_height=cfg.model.ldm.latent_height,
+            latent_width=cfg.model.ldm.latent_width,
             lr=cfg.model.ldm.lr,
             num_timesteps=cfg.model.ldm.num_timesteps,
             noise_schedule=cfg.model.ldm.noise_schedule,
@@ -487,6 +513,7 @@ def train_hierarchy(cfg):
             num_layers=cfg.model.ldm.num_layers,
             optimizer=cfg.optimizer.ldm,
             scheduler=cfg.scheduler.ldm,
+            param_type=cfg.model.ldm.param_type,
         )
         ldm_checkpoint = ModelCheckpoint(
             dirpath=ldm_ckpt_dir,
@@ -504,6 +531,11 @@ def train_hierarchy(cfg):
             callbacks=[ldm_checkpoint],
         )
         trainer_ldm.fit(ldm_module, datamodule=data_module)
+
+
+
+
+
 
 if __name__ == "__main__":
     cfg = OmegaConf.load("conf/config_experiments.yaml")
