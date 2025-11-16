@@ -1,15 +1,11 @@
+import os
 import torch
-from torch import nn
-from torch.utils.data import DataLoader, Dataset, TensorDataset
 import torch.nn.functional as F
+from torch import nn
+from torch.utils.data import DataLoader, Dataset
 from lightning import LightningModule, LightningDataModule, Trainer
 from lightning.pytorch.callbacks import ModelCheckpoint
-import numpy as np
 from omegaconf import OmegaConf
-import random
-import os
-import json
-import yaml
 
 from preprocessing import load_and_normalise, decompress_zst_pt, get_file_list, collate_fn
 
@@ -32,20 +28,16 @@ class DownscalingDataset(Dataset):
         hf, lf, hour = self.samples[idx]
         high_data = decompress_zst_pt(hf)
         low_data = decompress_zst_pt(lf)
-        high_t2m = high_data[hour]["2mT"].float()
-        low_t2m = low_data[hour]["2mT"].float()
-        high_t2m = high_t2m.unsqueeze(0)
-        low_t2m = low_t2m.unsqueeze(0)
+        high_t2m = high_data[hour]["2mT"].float().unsqueeze(0)
+        low_t2m = low_data[hour]["2mT"].float().unsqueeze(0)
         dem = self.static_vars["dem"].unsqueeze(0)
         lat = self.static_vars["lat"].unsqueeze(0)
         lc = self.static_vars["lc"]
-        return {
-            "low_2mT": low_t2m,
-            "high_2mT": high_t2m,
-            "dem": dem,
-            "lat": lat,
-            "lc": lc
-        }
+        fuzzy_input = torch.cat([
+            F.interpolate(low_t2m.unsqueeze(0), size=high_t2m.shape[-2:], mode='bilinear', align_corners=False).squeeze(0),
+            dem, lat, lc
+        ], dim=0)
+        return fuzzy_input, high_t2m
 
 class DownscalingDataModule(LightningDataModule):
     def __init__(self, batch_size, val_frac, test_frac, num_workers, static_dir, save_stats_json):
@@ -79,13 +71,13 @@ class DownscalingDataModule(LightningDataModule):
         self.test_set = torch.utils.data.Subset(dataset, range(n_train + n_val, N))
 
     def train_dataloader(self):
-        return DataLoader(self.train_set, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers, collate_fn=collate_fn)
+        return DataLoader(self.train_set, batch_size=self.batch_size, shuffle=True, num_workers=self.num_workers)
 
     def val_dataloader(self):
-        return DataLoader(self.val_set, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, collate_fn=collate_fn)
+        return DataLoader(self.val_set, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
 
     def test_dataloader(self):
-        return DataLoader(self.test_set, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers, collate_fn=collate_fn)
+        return DataLoader(self.test_set, batch_size=self.batch_size, shuffle=False, num_workers=self.num_workers)
 
     @property
     def test_dataset(self):
@@ -104,38 +96,6 @@ class UNet(nn.Module):
         output = self.final(h)
         return output
 
-class ResidualsDataModule(LightningDataModule):
-    def __init__(self, unet_preds, residuals, batch_size):
-        super().__init__()
-        self.unet_preds = unet_preds
-        self.residuals = residuals
-        self.batch_size = batch_size
-
-    def setup(self, stage=None):
-        self.dataset = TensorDataset(self.unet_preds, self.residuals)
-
-    def train_dataloader(self):
-        return DataLoader(self.dataset, batch_size=self.batch_size, shuffle=True)
-
-    def val_dataloader(self):
-        return DataLoader(self.dataset, batch_size=self.batch_size, shuffle=False)
-
-    def test_dataloader(self):
-        return DataLoader(self.dataset, batch_size=self.batch_size, shuffle=False)
-
-def kl_divergence(mean, log_var):
-    kl = 0.5 * (log_var.exp() + mean.square() - 1.0 - log_var)
-    return kl.mean()
-
-def standard_normal_sampling(mean, log_var, num=None):
-    std = log_var.mul(0.5).exp()
-    shape = mean.shape
-    if num is not None:
-        shape = shape[:1] + (num,) + shape[1:]
-        mean = mean[:, None, ...]
-        std = std[:, None, ...]
-    return mean + std * torch.randn(shape, device=mean.device)
-
 class UNetLitModule(LightningModule):
     def __init__(
         self,
@@ -148,8 +108,6 @@ class UNetLitModule(LightningModule):
         out_channels: int = 1,
         channels: list = [32, 16],
         kernel_size: int = 3,
-        ckpt_path: str = None,
-        ignore_keys: list = []
     ):
         super().__init__()
         self.save_hyperparameters(logger=False, ignore=['net', 'loss_fn'])
@@ -221,21 +179,27 @@ class UNetLitModule(LightningModule):
         else:
             return optimizer
 
+
+def kl_divergence(mean, log_var):
+    kl = 0.5 * (log_var.exp() + mean.square() - 1.0 - log_var)
+    return kl.mean()
+
 class VAE(nn.Module):
-    def __init__(self, latent_dim=32, input_channels=2, input_height=672, input_width=576, encoder_channels=[8], decoder_channels=[8]):
+    def __init__(self, latent_dim=32, hidden_dim=128):
         super().__init__()
         self.encoder = nn.Sequential(
-            nn.Conv2d(input_channels, encoder_channels[0], 3, padding=1), nn.ReLU(),
-            nn.MaxPool2d(2), nn.Flatten()
+            nn.Conv2d(1, hidden_dim, 3, padding=1), nn.ReLU(),
+            nn.AdaptiveAvgPool2d(1),
+            nn.Flatten()
         )
-        encoded_size = encoder_channels[0] * (input_height // 2) * (input_width // 2)
-        self.fc_mu = nn.Linear(encoded_size, latent_dim)
-        self.fc_logvar = nn.Linear(encoded_size, latent_dim)
-        self.fc_decode = nn.Linear(latent_dim, encoded_size)
+        self.fc_mu = nn.Linear(hidden_dim, latent_dim)
+        self.fc_logvar = nn.Linear(hidden_dim, latent_dim)
+        self.fc_decode = nn.Linear(latent_dim, hidden_dim)
         self.decoder = nn.Sequential(
-            nn.Unflatten(1, (decoder_channels[0], input_height // 2, input_width // 2)),
-            nn.ConvTranspose2d(decoder_channels[0] + 1, 1, 2, stride=2),
-            nn.Sigmoid()
+            nn.Unflatten(1, (hidden_dim, 1, 1)),
+            nn.ConvTranspose2d(hidden_dim, 32, 8, stride=8),
+            nn.ReLU(),
+            nn.ConvTranspose2d(32, 1, 84, stride=84),
         )
 
     def encode(self, x):
@@ -246,84 +210,57 @@ class VAE(nn.Module):
         std = (0.5 * logvar).exp()
         return mu + std * torch.randn_like(std)
 
-    def decode(self, z, unet_pred):
+    def decode(self, z):
         h = self.fc_decode(z)
-        h = h.view(z.size(0), -1, unet_pred.shape[-2] // 2, unet_pred.shape[-1] // 2)
-        unet_pred_ds = F.interpolate(unet_pred, size=h.shape[-2:], mode='bilinear', align_corners=False)
-        h_cat = torch.cat([h, unet_pred_ds], dim=1)
-        return self.decoder(h_cat)
+        x = self.decoder(h)
+        # x: [B, 1, H, W] (likely [672, 672])
+        x = F.interpolate(x, size=(672, 576), mode='bilinear', align_corners=False)
+        return x
 
-    def forward(self, x, unet_pred, sample_posterior=True):
+    def forward(self, x, sample_posterior=True):
         mu, logvar = self.encode(x)
         z = self.reparameterize(mu, logvar) if sample_posterior else mu
-        recon = self.decode(z, unet_pred)
+        recon = self.decode(z)
         return recon, mu, logvar
 
 class VAELitModule(LightningModule):
-    def __init__(self, latent_dim=32, lr=1e-3, kl_weight=0.001, input_channels=2, input_height=672, input_width=576, encoder_channels=[8], decoder_channels=[8], optimizer=None, scheduler=None, unet_module=None):
+    def __init__(self, vae, unet_module, kl_weight=0.001, lr=1e-3):
         super().__init__()
-        self.save_hyperparameters(logger=False, ignore=['unet_module'])
-        self.model = VAE(
-            latent_dim=latent_dim,
-            input_channels=input_channels,
-            input_height=input_height,
-            input_width=input_width,
-            encoder_channels=encoder_channels,
-            decoder_channels=decoder_channels,
-        )
-        self.lr = lr
-        self.kl_weight = kl_weight
-        self.hparams.optimizer = optimizer
-        self.hparams.scheduler = scheduler
+        self.vae = vae
         self.unet = unet_module
+        self.kl_weight = kl_weight
+        self.lr = lr
 
-    def forward(self, x, sample_posterior=True):
-        return self.model(x, sample_posterior)
-
-    def _loss(self, batch):
+    def training_step(self, batch, batch_idx):
         fuzzy_input, sharp_target = batch
         with torch.no_grad():
             unet_pred = self.unet(fuzzy_input)
         residual = sharp_target - unet_pred
-        encoder_input = torch.cat([unet_pred[:, 0:1], residual], dim=1)
-        recon, mu, logvar = self.model(encoder_input, unet_pred[:, 0:1])
+        # Only use the UNet-predicted temperature channel as condition
+        condition = unet_pred[:, 0:1]
+        recon, mu, logvar = self.vae(condition)
         recon_loss = F.l1_loss(recon, residual)
         kl_loss = kl_divergence(mu, logvar)
         total_loss = recon_loss + self.kl_weight * kl_loss
-        return total_loss, recon_loss, kl_loss
-
-    def training_step(self, batch, batch_idx):
-        total_loss, recon_loss, kl_loss = self._loss(batch)
-        self.log("train/loss", total_loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
-        self.log("train/recon_loss", recon_loss, on_step=True, on_epoch=True, sync_dist=True)
-        self.log("train/kl_loss", kl_loss, on_step=True, on_epoch=True, sync_dist=True)
+        self.log("train/loss", total_loss)
         return total_loss
 
     def validation_step(self, batch, batch_idx):
-        total_loss, recon_loss, kl_loss = self._loss(batch)
-        self.log("val/loss", total_loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
-        self.log("val/recon_loss", recon_loss, on_step=False, on_epoch=True, sync_dist=True)
-        self.log("val/kl_loss", kl_loss, on_step=False, on_epoch=True, sync_dist=True)
-        return total_loss
-
-    def test_step(self, batch, batch_idx):
-        total_loss, recon_loss, kl_loss = self._loss(batch)
-        self.log("test/loss", total_loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
-        self.log("test/recon_loss", recon_loss, on_step=False, on_epoch=True, sync_dist=True)
-        self.log("test/kl_loss", kl_loss, on_step=False, on_epoch=True, sync_dist=True)
+        fuzzy_input, sharp_target = batch
+        with torch.no_grad():
+            unet_pred = self.unet(fuzzy_input)
+        residual = sharp_target - unet_pred
+        condition = unet_pred[:, 0:1]
+        recon, mu, logvar = self.vae(condition)
+        recon_loss = F.l1_loss(recon, residual)
+        kl_loss = kl_divergence(mu, logvar)
+        total_loss = recon_loss + self.kl_weight * kl_loss
+        self.log("val/loss", total_loss)
         return total_loss
 
     def configure_optimizers(self):
-        opt_cfg = self.hparams.get("optimizer", None)
-        sch_cfg = self.hparams.get("scheduler", None)
-        if opt_cfg and opt_cfg.get("type") == "AdamW":
-            optimizer = torch.optim.AdamW(self.parameters(), lr=opt_cfg.get("lr", self.lr), betas=tuple(opt_cfg.get("betas", (0.5, 0.9))), weight_decay=opt_cfg.get("weight_decay", 1e-3))
-        else:
-            optimizer = torch.optim.Adam(self.parameters(), lr=opt_cfg.get("lr", self.lr) if opt_cfg else self.lr, weight_decay=opt_cfg.get("weight_decay", 1e-4) if opt_cfg else 1e-4)
-        if sch_cfg and sch_cfg.get("type") == "ReduceLROnPlateau":
-            scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=sch_cfg.get("patience", 3), factor=sch_cfg.get("factor", 0.25))
-            return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "monitor": sch_cfg.get("monitor", "val/recon_loss"), "frequency": 1}}
-        return optimizer
+        return torch.optim.Adam(self.parameters(), lr=self.lr)
+
 
 class LatentDenoiser(nn.Module):
     def __init__(self, in_channels, out_channels, channels, kernel_size):
@@ -353,8 +290,9 @@ class LDMLitModule(LightningModule):
     def __init__(self, vae, latent_dim=64, lr=1e-4, num_timesteps=50, noise_schedule="linear", loss_type="l2", hidden_dim=128, num_layers=4, optimizer=None, scheduler=None):
         super().__init__()
         self.save_hyperparameters(logger=False, ignore=['vae'])
-        self.vae = vae.model.requires_grad_(False)
+        self.vae = vae.vae.requires_grad_(False)
         self.vae.eval()
+        self.unet = vae.unet
         self.denoiser = LatentDenoiser(1, 1, [hidden_dim]*num_layers, 3)
         self.lr = lr
         self.num_timesteps = num_timesteps
@@ -374,6 +312,7 @@ class LDMLitModule(LightningModule):
             betas = torch.clamp(betas, 0, 0.999)
         else:
             raise ValueError(f"Unknown schedule: {schedule}")
+
         alphas = 1 - betas
         alphas_cumprod = torch.cumprod(alphas, dim=0)
         self.register_buffer('betas', betas)
@@ -401,54 +340,34 @@ class LDMLitModule(LightningModule):
 
     def forward(self, x, unet_pred):
         with torch.no_grad():
-            mu, logvar = self.vae.encode(x)
+            mu, logvar = self.vae.encode(unet_pred[:, 0:1])
             z = self.vae.reparameterize(mu, logvar)
         t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device)
-        return self.p_losses(z, unet_pred, t)
+        return self.p_losses(z, unet_pred[:, 0:1], t)
 
     def training_step(self, batch, batch_idx):
         fuzzy_input, sharp_target = batch
         with torch.no_grad():
-            unet_pred = self.vae.unet(fuzzy_input)
-        residual = sharp_target - unet_pred
-        encoder_input = torch.cat([unet_pred, residual], dim=1)
-        loss = self.forward(encoder_input, unet_pred)
+            unet_pred = self.unet(fuzzy_input)
+        loss = self.forward(fuzzy_input, unet_pred)
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
         return loss
 
     def validation_step(self, batch, batch_idx):
-        loss = self.forward(batch[1])
+        fuzzy_input, sharp_target = batch
+        with torch.no_grad():
+            unet_pred = self.unet(fuzzy_input)
+        loss = self.forward(fuzzy_input, unet_pred)
         self.log("val/loss", loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
         return loss
 
     def test_step(self, batch, batch_idx):
-        loss = self.forward(batch[1])
+        fuzzy_input, sharp_target = batch
+        with torch.no_grad():
+            unet_pred = self.unet(fuzzy_input)
+        loss = self.forward(fuzzy_input, unet_pred)
         self.log("test/loss", loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
         return loss
-
-    @torch.no_grad()
-    def sample(self, shape, unet_pred, num_steps=50):
-        z = torch.randn(shape, device=self.device)
-        H, W = shape[2], shape[3]
-        unet_pred_ds = F.interpolate(unet_pred, size=(H, W), mode='bilinear', align_corners=False)
-        timesteps = torch.linspace(self.num_timesteps-1, 0, num_steps, dtype=torch.long, device=self.device)
-        for i, t in enumerate(timesteps):
-            t_batch = t.repeat(shape[0])
-            predicted_noise = self.denoiser(z, unet_pred_ds, t_batch.unsqueeze(1))
-            alpha_t = self.alphas_cumprod[t]
-            alpha_t_prev = self.alphas_cumprod[t-1] if t > 0 else torch.tensor(1.0)
-            pred_x0 = (z - torch.sqrt(1 - alpha_t) * predicted_noise) / torch.sqrt(alpha_t)
-            if t > 0:
-                noise = torch.randn_like(z) if i < len(timesteps) - 1 else 0
-                z = torch.sqrt(alpha_t_prev) * pred_x0 + torch.sqrt(1 - alpha_t_prev) * noise
-            else:
-                z = pred_x0
-        return z
-
-    @torch.no_grad()
-    def generate_samples(self, num_samples=1):
-        z_samples = self.sample((num_samples, self.hparams.latent_dim))
-        return self.vae.decode(z_samples)
 
     def configure_optimizers(self):
         opt_cfg = self.hparams.get("optimizer", None)
@@ -477,7 +396,7 @@ def train_hierarchy(cfg):
     checkpoint_dir = cfg.paths.checkpoint_dir
     os.makedirs(checkpoint_dir, exist_ok=True)
 
-    # Unet for mean pred
+    # --- UNet ---
     unet_ckpt_dir = os.path.join(checkpoint_dir, "unet")
     os.makedirs(unet_ckpt_dir, exist_ok=True)
     unet_ckpts = sorted([f for f in os.listdir(unet_ckpt_dir) if f.endswith(".ckpt")])
@@ -514,29 +433,6 @@ def train_hierarchy(cfg):
         )
         trainer_unet.fit(unet_module, datamodule=data_module)
 
-    # Calculating residuals and also storing unet pred for conditional generation
-    unet_preds = []
-    residuals = []
-    fuzzy_inputs = []
-
-    for batch in data_module.train_dataloader():
-        fuzzy_input, sharp_target = batch
-        device = next(unet_module.parameters()).device
-        fuzzy_input = fuzzy_input.to(device)
-        sharp_target = sharp_target.to(device)
-        with torch.no_grad():
-            pred = unet_module.net(fuzzy_input)
-            residual = sharp_target - pred
-            unet_pred_coarse = pred[:, 0:1]
-            residual = residual.cpu()
-            fuzzy_inputs.append(fuzzy_input)
-            unet_preds.append(unet_pred_coarse)
-            residuals.append(residual)
-    fuzzy_inputs = torch.cat(fuzzy_inputs, dim=0)
-    unet_preds = torch.cat(unet_preds, dim=0)
-    residuals = torch.cat(residuals, dim=0)
-
-    # VAE
     vae_ckpt_dir = os.path.join(checkpoint_dir, "vae")
     os.makedirs(vae_ckpt_dir, exist_ok=True)
     vae_ckpts = sorted([f for f in os.listdir(vae_ckpt_dir) if f.endswith(".ckpt")])
@@ -545,18 +441,15 @@ def train_hierarchy(cfg):
         vae_module = VAELitModule.load_from_checkpoint(os.path.join(vae_ckpt_dir, vae_ckpts[-1]))
     else:
         print("Training VAE")
-        vae_module = VAELitModule(
+        vae = VAE(
             latent_dim=cfg.model.vae.latent_dim,
-            lr=cfg.model.vae.lr,
+            hidden_dim=cfg.model.vae.hidden_dim
+        )
+        vae_module = VAELitModule(
+            vae=vae,
+            unet_module=unet_module,
             kl_weight=cfg.model.vae.kl_weight,
-            input_channels=cfg.model.vae.input_channels,
-            input_height=cfg.model.vae.input_height,
-            input_width=cfg.model.vae.input_width,
-            encoder_channels=cfg.model.vae.encoder_channels,
-            decoder_channels=cfg.model.vae.decoder_channels,
-            optimizer=cfg.optimizer.vae,
-            scheduler=cfg.scheduler.vae,
-            unet_module=unet_module
+            lr=cfg.model.vae.lr
         )
         vae_checkpoint = ModelCheckpoint(
             dirpath=vae_ckpt_dir,
@@ -565,8 +458,6 @@ def train_hierarchy(cfg):
             monitor="val/loss",
             mode="min",
         )
-        residual_data_module = ResidualsDataModule(unet_preds, residuals, cfg.data.batch_size)
-        residual_data_module.setup()
         trainer_vae = Trainer(
             max_epochs=cfg.training.vae_epochs,
             accelerator=cfg.trainer.accelerator,
@@ -575,39 +466,44 @@ def train_hierarchy(cfg):
             default_root_dir=vae_ckpt_dir,
             callbacks=[vae_checkpoint],
         )
-        trainer_vae.fit(vae_module, datamodule=residual_data_module)
+        trainer_vae.fit(vae_module, datamodule=data_module)
 
-    # LDM
-    ldm_module = LDMLitModule(
-        vae=vae_module,
-        latent_dim=cfg.model.ldm.latent_dim,
-        lr=cfg.model.ldm.lr,
-        num_timesteps=cfg.model.ldm.num_timesteps,
-        noise_schedule=cfg.model.ldm.noise_schedule,
-        loss_type=cfg.model.ldm.loss_type,
-        hidden_dim=cfg.model.ldm.hidden_dim,
-        num_layers=cfg.model.ldm.num_layers,
-        optimizer=cfg.optimizer.ldm,
-        scheduler=cfg.scheduler.ldm,
-    )
-    ldm_checkpoint = ModelCheckpoint(
-        dirpath=os.path.join(checkpoint_dir, "ldm"),
-        filename="ldm-{epoch:02d}",
-        save_top_k=1,
-        monitor="val/loss",
-        mode="min",
-    )
-    residual_data_module = ResidualsDataModule(unet_preds, residuals, cfg.data.batch_size)
-    residual_data_module.setup()
-    trainer_ldm = Trainer(
-        max_epochs=cfg.training.ldm_epochs,
-        accelerator=cfg.trainer.accelerator,
-        enable_checkpointing=True,
-        logger=False,
-        default_root_dir=os.path.join(checkpoint_dir, "ldm"),
-        callbacks=[ldm_checkpoint],
-    )
-    trainer_ldm.fit(ldm_module, datamodule=residual_data_module)
+    ldm_ckpt_dir = os.path.join(checkpoint_dir, "ldm")
+    os.makedirs(ldm_ckpt_dir, exist_ok=True)
+    ldm_ckpts = sorted([f for f in os.listdir(ldm_ckpt_dir) if f.endswith(".ckpt")])
+    if ldm_ckpts:
+        print("Loading pretrained LDM ckpt")
+        ldm_module = LDMLitModule.load_from_checkpoint(os.path.join(ldm_ckpt_dir, ldm_ckpts[-1]), vae=vae_module)
+    else:
+        print("Training LDM")
+        ldm_module = LDMLitModule(
+            vae=vae_module,
+            latent_dim=cfg.model.ldm.latent_dim,
+            lr=cfg.model.ldm.lr,
+            num_timesteps=cfg.model.ldm.num_timesteps,
+            noise_schedule=cfg.model.ldm.noise_schedule,
+            loss_type=cfg.model.ldm.loss_type,
+            hidden_dim=cfg.model.ldm.hidden_dim,
+            num_layers=cfg.model.ldm.num_layers,
+            optimizer=cfg.optimizer.ldm,
+            scheduler=cfg.scheduler.ldm,
+        )
+        ldm_checkpoint = ModelCheckpoint(
+            dirpath=ldm_ckpt_dir,
+            filename="ldm-{epoch:02d}",
+            save_top_k=1,
+            monitor="val/loss",
+            mode="min",
+        )
+        trainer_ldm = Trainer(
+            max_epochs=cfg.training.ldm_epochs,
+            accelerator=cfg.trainer.accelerator,
+            enable_checkpointing=True,
+            logger=False,
+            default_root_dir=ldm_ckpt_dir,
+            callbacks=[ldm_checkpoint],
+        )
+        trainer_ldm.fit(ldm_module, datamodule=data_module)
 
 if __name__ == "__main__":
     cfg = OmegaConf.load("conf/config_experiments.yaml")
