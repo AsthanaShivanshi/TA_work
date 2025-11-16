@@ -23,6 +23,8 @@ def compute_stats(tensor):
 def decompress_zst_pt(filepath):
     with open(filepath, "rb") as f:
         compressed = f.read()
+
+        
     dctx = zstandard.ZstdDecompressor()
     decompressed = io.BytesIO(dctx.decompress(compressed))
     data = torch.load(decompressed, weights_only=False)

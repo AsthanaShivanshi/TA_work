@@ -1,5 +1,5 @@
 data:
-  batch_size: 16
+  batch_size: 32
   num_workers: 1
   test_split: 0.15
   val_split: 0.15
@@ -25,7 +25,7 @@ model:
     - 8
     encoder_channels:
     - 8
-    input_channels: 1
+    input_channels: 2
     input_height: 672
     input_width: 576
     kl_weight: 0.001

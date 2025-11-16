@@ -1,0 +1,5 @@
+/work/FAC/FGSE/IDYST/tbeucler/downscaling/sasthana/Downscaling/Downscaling_Models/.micromamba/envs/diffscaler/share/proj
+/work/FAC/FGSE/IDYST/tbeucler/downscaling/sasthana/Downscaling/Downscaling_Models/.micromamba/envs/diffscaler/bin/python
+Using 48 samples from 2020.
+Using 48 samples from 2020.
+Loading pretrained UNet ckpt
