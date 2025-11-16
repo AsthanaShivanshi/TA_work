@@ -33,7 +33,7 @@ model:
     input_height: 672
     input_width: 576
     kl_weight: 0.001
-    latent_dim: 32
+    latent_dim: 36
     lr: 0.0001
 optimizer:
   ldm:
