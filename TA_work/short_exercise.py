@@ -1,3 +1,4 @@
+from multiprocessing import context
 import os
 import torch
 import torch.nn.functional as F
@@ -265,7 +266,7 @@ class VAELitModule(LightningModule):
 
 
 class LatentDenoiser(nn.Module):
-    def __init__(self, in_channels, out_channels, channels, kernel_size):
+    def __init__(self, in_channels, out_channels, channels, kernel_size, context_channels=0):
         super().__init__()
         self.time_embed = nn.Sequential(
             nn.Linear(1, channels[0]),
@@ -273,31 +274,36 @@ class LatentDenoiser(nn.Module):
             nn.Linear(channels[0], channels[0])
         )
         self.unet = UNet(
-            in_channels=in_channels + 2,
+            in_channels=in_channels + 2 + context_channels,  # +context_channels
             out_channels=out_channels,
             channels=channels,
             kernel_size=kernel_size
         )
 
-    def forward(self, z_noisy, unet_pred, timestep=None):
+    def forward(self, z_noisy, unet_pred, timestep=None, context=None):
         if timestep is None:
             timestep = torch.zeros(z_noisy.shape[0], 1, device=z_noisy.device)
         B, _, H, W = z_noisy.shape
         t_embed = self.time_embed(timestep.float())
         t_map = t_embed[:, :1].unsqueeze(-1).unsqueeze(-1).expand(-1, 1, H, W)
-        x = torch.cat([z_noisy, unet_pred, t_map], dim=1)
+        inputs = [z_noisy, unet_pred, t_map]
+        if context is not None:
+            inputs.append(context)
+        x = torch.cat(inputs, dim=1)
         return self.unet(x)
 
 class LDMLitModule(LightningModule):
-    def __init__(self, vae, latent_dim=64, latent_height=6, latent_width=6, lr=1e-4, num_timesteps=50, noise_schedule="linear", loss_type="l2", hidden_dim=128, num_layers=4, param_type="eps", optimizer=None, scheduler=None):
+    def __init__(self, vae, latent_dim=36, conditioner=None, latent_height=6, latent_width=6, lr=1e-4, num_timesteps=50, noise_schedule="linear", loss_type="l2", hidden_dim=128, num_layers=4, param_type="eps", optimizer=None, scheduler=None):
         super().__init__()
+        assert latent_dim == latent_height * latent_width,(f"latent_dim ({latent_dim}) must equal latent_height*latent_width ({latent_height}*{latent_width})")
         self.save_hyperparameters(logger=False, ignore=['vae'])
         self.vae = vae.vae.requires_grad_(False)
         self.latent_height = latent_height
         self.latent_width = latent_width
         self.vae.eval()
         self.unet = vae.unet
-        self.denoiser = LatentDenoiser(1, 1, [hidden_dim]*num_layers, 3)
+        self.conditioner = conditioner
+        self.denoiser = LatentDenoiser(1, 1, [hidden_dim]*num_layers, 3, context_channels=1)
         self.lr = lr
         self.num_timesteps = num_timesteps
         self.loss_fn = {"l1": nn.L1Loss(), "l2": nn.MSELoss()}[loss_type]
@@ -305,6 +311,9 @@ class LDMLitModule(LightningModule):
         self.register_noise_schedule(noise_schedule)
         self.hparams.optimizer = optimizer
         self.hparams.scheduler = scheduler
+
+
+
 
     def register_noise_schedule(self, schedule="linear"):
         if schedule == "linear":
@@ -328,17 +337,24 @@ class LDMLitModule(LightningModule):
     def q_sample(self, x_start, t, noise=None):
         if noise is None:
             noise = torch.randn_like(x_start)
-        return (self.sqrt_alphas_cumprod[t].view(-1, 1) * x_start +
-                self.sqrt_one_minus_alphas_cumprod[t].view(-1, 1) * noise)
+        # Ensure t is [B] and expand to [B, 1, 1, 1] for broadcasting
+        sqrt_alpha = self.sqrt_alphas_cumprod[t].view(-1, 1, 1, 1)
+        sqrt_one_minus_alpha = self.sqrt_one_minus_alphas_cumprod[t].view(-1, 1, 1, 1)
+        return sqrt_alpha * x_start + sqrt_one_minus_alpha * noise
 
-    def p_losses(self, x_start, unet_pred, t, noise=None):
+    def p_losses(self, x_start, unet_pred, t, noise=None, context=None):
         if noise is None:
             noise = torch.randn_like(x_start)
         x_noisy = self.q_sample(x_start, t, noise)
         B = x_noisy.shape[0]
-
         x_noisy_4d = x_noisy.view(B, 1, self.latent_height, self.latent_width)
         unet_pred_ds = F.interpolate(unet_pred, size=(self.latent_height, self.latent_width), mode='bilinear', align_corners=False)
+        context_ds = None
+        if self.conditioner is not None and context is not None:
+            context_ds = self.conditioner(context)
+
+        # Only call once, with context
+        predicted = self.denoiser(x_noisy_4d, unet_pred_ds, t.unsqueeze(1).to(x_noisy.device), context=context_ds)
 
         # param can be "eps", "x0", or "v"
         if self.param_type == "eps":
@@ -352,23 +368,28 @@ class LDMLitModule(LightningModule):
         else:
             raise ValueError(f"Unknown param_type: {self.param_type}")
 
-        predicted = self.denoiser(x_noisy_4d, unet_pred_ds, t.unsqueeze(1).to(x_noisy.device))
         return self.loss_fn(predicted, target)
 
-    def forward(self, x, unet_pred):
+    def forward(self, x, unet_pred, context=None):
         with torch.no_grad():
             mu, logvar = self.vae.encode(unet_pred[:, 0:1])
             z = self.vae.reparameterize(mu, logvar)
-        # z to [B, 1, latent_height, latent_width]
+        print("z shape before reshape:", z.shape)  # Debug print
+        assert z.shape[1] * z.shape[0] != self.latent_height * self.latent_width, (
+            f"Latent shape mismatch: got {z.shape}, expected ({-1}, {self.latent_height * self.latent_width})"
+        )
         z = z.view(-1, 1, self.latent_height, self.latent_width)
         t = torch.randint(0, self.num_timesteps, (x.shape[0],), device=self.device)
-        return self.p_losses(z, unet_pred[:, 0:1], t)
+        return self.p_losses(z, z, t, context=context)
+        
 
     def training_step(self, batch, batch_idx):
         fuzzy_input, sharp_target = batch
         with torch.no_grad():
             unet_pred = self.unet(fuzzy_input)
-        loss = self.forward(fuzzy_input, unet_pred)
+        # Only pass low-res temperature (assumed to be channel 0) as context
+        context = fuzzy_input[:, 0:1]
+        loss = self.forward(fuzzy_input, unet_pred, context=context)
         self.log("train/loss", loss, on_step=True, on_epoch=True, prog_bar=True, sync_dist=True)
         return loss
 
@@ -376,7 +397,8 @@ class LDMLitModule(LightningModule):
         fuzzy_input, sharp_target = batch
         with torch.no_grad():
             unet_pred = self.unet(fuzzy_input)
-        loss = self.forward(fuzzy_input, unet_pred)
+        context = fuzzy_input[:, 0:1]
+        loss = self.forward(fuzzy_input, unet_pred, context=context)
         self.log("val/loss", loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
         return loss
 
@@ -384,7 +406,8 @@ class LDMLitModule(LightningModule):
         fuzzy_input, sharp_target = batch
         with torch.no_grad():
             unet_pred = self.unet(fuzzy_input)
-        loss = self.forward(fuzzy_input, unet_pred)
+        context = fuzzy_input[:, 0:1]
+        loss = self.forward(fuzzy_input, unet_pred, context=context)
         self.log("test/loss", loss, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
         return loss
 
@@ -399,6 +422,24 @@ class LDMLitModule(LightningModule):
             scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=sch_cfg.get("patience", 5), factor=sch_cfg.get("factor", 0.5))
             return {"optimizer": optimizer, "lr_scheduler": {"scheduler": scheduler, "monitor": sch_cfg.get("monitor", "val/loss"), "frequency": 1}}
         return optimizer
+
+
+
+#for conditional geeration, writing a simple CNN conditooner : 
+
+class Conditioner(nn.Module):
+    def __init__(self, in_channels, out_channels, latent_height, latent_width):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Conv2d(in_channels, 32, 3, padding=1),
+            nn.ReLU(),
+            nn.Conv2d(32, out_channels, 3, padding=1),
+            nn.AdaptiveAvgPool2d((latent_height, latent_width))
+        )
+
+    def forward(self, x):
+        return self.net(x)
+    
 
 
 def train_hierarchy(cfg):
@@ -500,8 +541,18 @@ def train_hierarchy(cfg):
         ldm_module = LDMLitModule.load_from_checkpoint(os.path.join(ldm_ckpt_dir, ldm_ckpts[-1]), vae=vae_module)
     else:
         print("Training LDM")
+
+
+        conditioner= Conditioner(
+            in_channels= 1,
+            out_channels= 1,
+            latent_height=cfg.model.ldm.latent_height,
+            latent_width=cfg.model.ldm.latent_width
+        ) 
+
         ldm_module = LDMLitModule(
             vae=vae_module,
+            conditioner=conditioner,
             latent_dim=cfg.model.ldm.latent_dim,
             latent_height=cfg.model.ldm.latent_height,
             latent_width=cfg.model.ldm.latent_width,
@@ -531,9 +582,6 @@ def train_hierarchy(cfg):
             callbacks=[ldm_checkpoint],
         )
         trainer_ldm.fit(ldm_module, datamodule=data_module)
-
-
-
 
 
 
